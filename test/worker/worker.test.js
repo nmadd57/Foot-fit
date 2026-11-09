@@ -1,6 +1,6 @@
 // Unit tests for the worker using an in-memory Durable Object and a mocked fetch.
 import assert from 'node:assert/strict';
-import worker, { QuotaCounter, signJWT, verifyJWT, sanitizeChat } from '../src/index.js';
+import worker, { QuotaCounter, signJWT, verifyJWT, sanitizeChat } from '../../src/index.js';
 
 class MemStorage {
   constructor() { this.m = new Map(); }
@@ -16,7 +16,8 @@ const QUOTA = {
 };
 const env = {
   QUOTA, SESSION_SECRET: 'test-secret', GITHUB_CLIENT_ID: 'cid', GITHUB_CLIENT_SECRET: 'csecret', UPSTREAM_API_KEY: 'sk-up',
-  ALLOWED_ORIGINS: 'https://me.github.io', DAILY_REQUESTS_PER_USER: '3', GLOBAL_DAILY_REQUESTS: '100', MIN_ACCOUNT_AGE_DAYS: '30',
+  ASSETS: { fetch: async (req) => new Response(`asset:${new URL(req.url).pathname}`) },
+  DAILY_REQUESTS_PER_USER: '3', GLOBAL_DAILY_REQUESTS: '100', MIN_ACCOUNT_AGE_DAYS: '30',
   UPSTREAM_BASE_URL: 'https://llm.example/v1', UPSTREAM_MODEL: 'vision-model',
 };
 const waits = [];
@@ -44,9 +45,15 @@ assert.equal(await verifyJWT(t, 'other'), null);
 assert.equal(await verifyJWT(t.slice(0, -2) + 'xx', 's'), null);
 assert.equal(await verifyJWT(await signJWT({ exp: 1 }, 's'), 's'), null, 'expired');
 
-// login: rejects foreign redirect, accepts allowed one
-assert.equal((await call('/auth/login?redirect=https://evil.example/')).status, 400);
-const login = await call('/auth/login?redirect=' + encodeURIComponent('https://me.github.io/foot-fit/'));
+// static assets are served for non-API paths
+assert.equal(await (await call('/index.html')).text(), 'asset:/index.html');
+
+// login: open redirects are neutralised to "/"
+const evil = await call('/auth/login?redirect=' + encodeURIComponent('https://evil.example/'));
+const evilState = await verifyJWT(new URL(evil.headers.get('Location')).searchParams.get('state'), env.SESSION_SECRET);
+assert.equal(evilState.r, '/');
+assert.equal((await verifyJWT(new URL((await call('/auth/login?redirect=//evil.example')).headers.get('Location')).searchParams.get('state'), env.SESSION_SECRET)).r, '/');
+const login = await call('/auth/login?redirect=' + encodeURIComponent('/index.html'));
 assert.equal(login.status, 302);
 const loc = new URL(login.headers.get('Location'));
 assert.equal(loc.origin + loc.pathname, 'https://github.com/login/oauth/authorize');
@@ -56,25 +63,31 @@ const nonce = login.headers.get('Set-Cookie').match(/ff_oauth=([^;]+)/)[1];
 // callback without the cookie fails (CSRF protection)
 const bad = await call(`/auth/callback?code=abc&state=${state}`);
 assert.match(bad.headers.get('Location'), /#ff_error=/);
-// callback with cookie succeeds and returns a session in the fragment
+// callback with cookie succeeds and sets an HttpOnly session cookie
 const cb = await call(`/auth/callback?code=abc&state=${state}`, { headers: { Cookie: `ff_oauth=${nonce}` } });
 assert.equal(cb.status, 302);
-const back = cb.headers.get('Location');
-assert.ok(back.startsWith('https://me.github.io/foot-fit/#ff_token='), back);
-const session = back.split('ff_token=')[1];
+assert.equal(cb.headers.get('Location'), '/index.html');
+const setCookie = cb.headers.getSetCookie().find((x) => x.startsWith('ff_session='));
+assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /Secure/); assert.match(setCookie, /SameSite=Lax/);
+const session = setCookie.match(/ff_session=([^;]+)/)[1];
 
 // /api/me
-const auth = { Authorization: `Bearer ${session}`, Origin: 'https://me.github.io' };
+const auth = { Cookie: `ff_session=${session}`, Origin: 'https://api.example', 'Content-Type': 'application/json' };
 const meRes = await call('/api/me', { headers: auth });
 assert.equal(meRes.status, 200);
-assert.equal(meRes.headers.get('Access-Control-Allow-Origin'), 'https://me.github.io');
-assert.equal((await meRes.json()).quota.dailyRemaining, 3);
-assert.equal((await call('/api/me')).status, 401);
+const meJ = await meRes.json();
+assert.equal(meJ.signedIn, true); assert.equal(meJ.quota.dailyRemaining, 3);
+assert.equal((await (await call('/api/me')).json()).signedIn, false);
+
+// cross-origin POSTs are refused even with the cookie
+assert.equal((await call('/api/chat', { method: 'POST', headers: { ...auth, Origin: 'https://evil.example' }, body: '{}' })).status, 403);
+assert.equal((await call('/api/chat', { method: 'POST', headers: { ...auth, 'Content-Type': 'text/plain' }, body: '{}' })).status, 415);
+assert.equal((await call('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401);
 
 // chat: sanitisation
 const img = 'data:image/jpeg;base64,AAAA';
 const body = (extra = {}) => JSON.stringify({ purpose: 'coach', model: 'gpt-expensive', max_tokens: 99999, messages: [{ role: 'system', content: 'x' }, { role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url: img } }] }], ...extra });
-const c1 = await call('/api/chat', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: body() });
+const c1 = await call('/api/chat', { method: 'POST', headers: auth, body: body() });
 assert.equal(c1.status, 200, await c1.clone().text());
 const j1 = await c1.json();
 assert.equal(j1.content, '{"ok":true}');
@@ -103,12 +116,16 @@ assert.match((await c5.json()).error, /daily request limit/);
 assert.equal(upstreamCalls.length, 4, 'no upstream call when over quota');
 
 // session version bump signs everyone out
-assert.equal((await worker.fetch(new Request('https://api.example/api/me', { headers: auth }), { ...env, SESSION_VERSION: '2' }, ctx)).status, 401);
+assert.equal((await (await worker.fetch(new Request('https://api.example/api/me', { headers: auth }), { ...env, SESSION_VERSION: '2' }, ctx)).json()).signedIn, false);
+
+// logout clears the cookie
+const lo = await call('/auth/logout', { method: 'POST', headers: auth });
+assert.match(lo.headers.get('Set-Cookie'), /ff_session=;.*Max-Age=0/);
 
 // young accounts are rejected
 globalThis.fetch = (orig => async (url, init) => String(url) === 'https://api.github.com/user'
   ? Response.json({ id: 7, login: 'newbie', created_at: new Date().toISOString() }) : orig(url, init))(globalThis.fetch);
-const l2 = await call('/auth/login?redirect=' + encodeURIComponent('https://me.github.io/'));
+const l2 = await call('/auth/login');
 const st2 = new URL(l2.headers.get('Location')).searchParams.get('state');
 const n2 = l2.headers.get('Set-Cookie').match(/ff_oauth=([^;]+)/)[1];
 const cb2 = await call(`/auth/callback?code=abc&state=${st2}`, { headers: { Cookie: `ff_oauth=${n2}` } });

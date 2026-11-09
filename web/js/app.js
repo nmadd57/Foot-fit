@@ -51,24 +51,22 @@ function download(blob, name) {
 async function renderAccount() {
   const el = $('account');
   el.innerHTML = '';
-  if (!llm.hostedAvailable()) return;
-  const sess = llm.sessionToken();
-  if (!sess) {
+  const user = await llm.fetchMe();
+  if (!llm.hostedAvailable()) { renderAIStatus(); return; }
+  if (!user) {
     const b = document.createElement('button');
     b.className = 'btn secondary'; b.textContent = 'Sign in with GitHub';
     b.onclick = () => llm.signIn();
     el.appendChild(b);
-    return;
+  } else {
+    el.innerHTML = `${user.avatar ? `<img src="${esc(user.avatar)}" alt="">` : ''}<div><div>${esc(user.login)}</div><div class="quota" id="quota"></div></div>`;
+    const out = document.createElement('button');
+    out.className = 'icon-btn'; out.title = 'Sign out'; out.textContent = '⎋';
+    out.onclick = async () => { await llm.signOut(); renderAccount(); };
+    el.appendChild(out);
+    if (user.quota) showQuota(user.quota);
   }
-  el.innerHTML = `${sess.user.av ? `<img src="${esc(sess.user.av)}" alt="">` : ''}<div><div>${esc(sess.user.login)}</div><div class="quota" id="quota"></div></div>`;
-  const out = document.createElement('button');
-  out.className = 'icon-btn'; out.title = 'Sign out'; out.textContent = '⎋';
-  out.onclick = () => { llm.signOut(); renderAccount(); renderAIStatus(); };
-  el.appendChild(out);
-  try {
-    const me = await llm.fetchMe();
-    if (me && me.quota) showQuota(me.quota);
-  } catch { /* offline */ }
+  renderAIStatus();
 }
 function showQuota(q) {
   const el = $('quota');
@@ -478,7 +476,8 @@ async function aiReport() {
 
 async function refreshQuota() {
   if (llm.activeBackend() !== 'hosted') return;
-  try { const me = await llm.fetchMe(); if (me?.quota) showQuota(me.quota); } catch { /* ignore */ }
+  const me = await llm.fetchMe();
+  if (me?.quota) showQuota(me.quota);
 }
 
 // ------------------------------------------------------------------ photo import
@@ -516,7 +515,7 @@ async function importPhotos(files) {
 const scanner = new Scanner();
 
 function init() {
-  const err = llm.captureTokenFromUrl();
+  const err = llm.captureAuthError();
   if (err) setTimeout(() => toast(`Sign-in failed: ${err}`, 6000), 300);
   applyPrefs();
   for (const id of ['paper', 'sheets', 'rulerMm', 'side']) $(id).addEventListener('change', savePrefs);
@@ -528,7 +527,7 @@ function init() {
   $('btnSaveSettings').onclick = (e) => {
     const s = readSettingsForm();
     if (s.mode === 'custom' && (!s.baseUrl || !s.model)) { e.preventDefault(); $('settingsTest').textContent = 'Base URL and model are required.'; return; }
-    if (s.mode === 'hosted' && !llm.sessionToken()) toast('Now sign in with GitHub (top right).');
+    if (s.mode === 'hosted' && !llm.currentUser()) toast('Now sign in with GitHub (top right).');
     llm.saveSettings(s); renderAIStatus();
   };
   $('btnTestAI').onclick = async () => {

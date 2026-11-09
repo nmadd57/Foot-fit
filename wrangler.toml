@@ -1,8 +1,15 @@
-# Cloudflare Worker for Foot Fit: GitHub sign-in, quotas and the LLM proxy.
-# Deploy:  npx wrangler deploy     (see README for the secrets to set first)
-name = "foot-fit-api"
+# Foot Fit on Cloudflare Workers: the static web app (./web) and the API on one origin.
+# Deploy:  npm run deploy     (see README for the secrets to set first)
+name = "foot-fit"
 main = "src/index.js"
 compatibility_date = "2025-06-01"
+
+# Static web app. Requests to /api/* and /auth/* run the Worker; everything else is a file.
+[assets]
+directory = "./web"
+binding = "ASSETS"
+not_found_handling = "404-page"
+run_worker_first = ["/api/*", "/auth/*"]
 
 [observability]
 enabled = true
@@ -16,8 +23,6 @@ tag = "v1"
 new_sqlite_classes = ["QuotaCounter"]
 
 [vars]
-# Comma-separated origins allowed to call the API and to receive sign-in redirects.
-ALLOWED_ORIGINS = "https://YOUR-USER.github.io,http://localhost:8000"
 # Any OpenAI-compatible endpoint (OpenAI, OpenRouter, Groq, Together, Azure-compatible gateway, vLLM, Ollama…)
 UPSTREAM_BASE_URL = "https://api.openai.com/v1"
 # Must be a vision-capable model.

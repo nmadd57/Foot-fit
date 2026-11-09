@@ -1,13 +1,14 @@
 {
-  "name": "foot-fit-api",
+  "name": "foot-fit",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node --import ./test/register.js test/worker.test.js"
+    "test": "node --import ./test/worker/register.js test/worker/worker.test.js"
   },
   "devDependencies": {
+    "three": "^0.170.0",
     "wrangler": "^4.0.0"
   }
 }

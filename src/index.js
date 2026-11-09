@@ -1,5 +1,6 @@
-// Foot Fit API worker (Cloudflare Workers).
-//  - GitHub OAuth sign-in  -> short-lived signed session token (HS256 JWT)
+// Foot Fit on Cloudflare Workers: serves the static web app (./web via Workers Assets)
+// and the API on the same origin.
+//  - GitHub OAuth sign-in  -> signed session (HS256 JWT) in an HttpOnly cookie
 //  - Per-account + global quotas, enforced atomically in a Durable Object
 //  - Proxy to any OpenAI-compatible /chat/completions endpoint; the upstream API key
 //    never reaches the browser and the model / token caps are fixed server-side.
@@ -11,7 +12,6 @@ function cfg(env) {
   const num = (v, d) => (v === undefined || v === '' ? d : Number(v));
   const list = (v) => String(v || '').split(',').map((s) => s.trim()).filter(Boolean);
   return {
-    allowedOrigins: list(env.ALLOWED_ORIGINS),
     allowedUsers: list(env.ALLOWED_GITHUB_USERS).map((s) => s.toLowerCase()),
     allowedOrgs: list(env.ALLOWED_GITHUB_ORGS).map((s) => s.toLowerCase()),
     blockedUsers: list(env.BLOCKED_GITHUB_USERS).map((s) => s.toLowerCase()),
@@ -73,16 +73,16 @@ function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 }
 
-function corsHeaders(req, c) {
+const SESSION_COOKIE = 'ff_session';
+
+function cookie(name, value, maxAge, path = '/') {
+  return `${name}=${value}; Path=${path}; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+/** Same-origin check for state-changing requests (defence in depth on top of SameSite=Lax). */
+function sameOrigin(req) {
   const origin = req.headers.get('Origin');
-  if (!origin || !c.allowedOrigins.includes(origin)) return {};
-  return {
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-    'Access-Control-Max-Age': '86400',
-    Vary: 'Origin',
-  };
+  return !origin || origin === new URL(req.url).origin;
 }
 
 function periods(now = new Date()) {
@@ -95,15 +95,13 @@ function getCookie(req, name) {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
-function redirectAllowed(url, c) {
-  try {
-    const u = new URL(url);
-    return c.allowedOrigins.includes(u.origin);
-  } catch { return false; }
+/** Only same-site relative paths are accepted as post-login destinations. */
+function safePath(p) {
+  return typeof p === 'string' && /^\/(?!\/)[\w\-./?=&%]*$/.test(p) ? p : '/';
 }
 
-function backWithError(redirect, msg) {
-  return Response.redirect(`${redirect.split('#')[0]}#ff_error=${encodeURIComponent(msg)}`, 302);
+function backWithError(path, msg) {
+  return new Response(null, { status: 302, headers: { Location: `${path.split('#')[0]}#ff_error=${encodeURIComponent(msg)}` } });
 }
 
 // ---------------------------------------------------------------- quota Durable Object
@@ -159,8 +157,7 @@ const quotaStub = (env, name) => env.QUOTA.get(env.QUOTA.idFromName(name));
 
 async function authLogin(req, env, c) {
   const url = new URL(req.url);
-  const redirect = url.searchParams.get('redirect') || '';
-  if (!redirectAllowed(redirect, c)) return json({ error: 'redirect not allowed' }, 400);
+  const redirect = safePath(url.searchParams.get('redirect') || '/');
   const nonce = b64url(crypto.getRandomValues(new Uint8Array(16)));
   const state = await signJWT({ r: redirect, n: nonce, exp: Math.floor(Date.now() / 1000) + 600 }, env.SESSION_SECRET);
   const gh = new URL('https://github.com/login/oauth/authorize');
@@ -173,7 +170,7 @@ async function authLogin(req, env, c) {
     status: 302,
     headers: {
       Location: gh.toString(),
-      'Set-Cookie': `ff_oauth=${nonce}; Path=/auth; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+      'Set-Cookie': cookie('ff_oauth', nonce, 600, '/auth'),
     },
   });
 }
@@ -181,7 +178,8 @@ async function authLogin(req, env, c) {
 async function authCallback(req, env, c) {
   const url = new URL(req.url);
   const st = await verifyJWT(url.searchParams.get('state'), env.SESSION_SECRET);
-  if (!st || !redirectAllowed(st.r, c)) return json({ error: 'invalid or expired state' }, 400);
+  if (!st) return backWithError('/', 'sign-in expired, please try again');
+  st.r = safePath(st.r);
   if (getCookie(req, 'ff_oauth') !== st.n) return backWithError(st.r, 'sign-in session mismatch, please try again');
   const code = url.searchParams.get('code');
   if (!code) return backWithError(st.r, url.searchParams.get('error_description') || 'sign-in cancelled');
@@ -215,16 +213,21 @@ async function authCallback(req, env, c) {
     sub: String(user.id), login: user.login, av: user.avatar_url, v: c.sessionVersion,
     iat: now, exp: now + c.sessionDays * 86400,
   }, env.SESSION_SECRET);
-  return new Response(null, {
-    status: 302,
-    headers: { Location: `${st.r.split('#')[0]}#ff_token=${session}`, 'Set-Cookie': 'ff_oauth=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax' },
-  });
+  const h = new Headers({ Location: st.r });
+  h.append('Set-Cookie', cookie(SESSION_COOKIE, session, c.sessionDays * 86400));
+  h.append('Set-Cookie', cookie('ff_oauth', '', 0, '/auth'));
+  return new Response(null, { status: 302, headers: h });
+}
+
+function logout(req) {
+  if (!sameOrigin(req)) return json({ error: 'forbidden' }, 403);
+  return json({ ok: true }, 200, { 'Set-Cookie': cookie(SESSION_COOKIE, '', 0) });
 }
 
 async function requireUser(req, env, c) {
-  const m = (req.headers.get('Authorization') || '').match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  const p = await verifyJWT(m[1], env.SESSION_SECRET);
+  const token = getCookie(req, SESSION_COOKIE);
+  if (!token) return null;
+  const p = await verifyJWT(token, env.SESSION_SECRET);
   if (!p || p.v !== c.sessionVersion) return null;
   if (c.blockedUsers.includes(String(p.login).toLowerCase())) return null;
   return p;
@@ -240,9 +243,9 @@ function quotaView(u, c) {
 
 async function me(req, env, c) {
   const user = await requireUser(req, env, c);
-  if (!user) return json({ error: 'unauthorized' }, 401);
+  if (!user) return json({ signedIn: false });
   const u = await quotaStub(env, `user:${user.sub}`).usage(periods());
-  return json({ login: user.login, avatar: user.av, quota: quotaView(u, c) });
+  return json({ signedIn: true, login: user.login, avatar: user.av, quota: quotaView(u, c) });
 }
 
 /** Validate and sanitise the client's chat request. Returns {error} or {messages, maxTokens, temperature, purpose}. */
@@ -281,6 +284,8 @@ export function sanitizeChat(body, c) {
 }
 
 async function chat(req, env, c, ctx) {
+  if (!sameOrigin(req)) return json({ error: 'forbidden' }, 403);
+  if (!(req.headers.get('Content-Type') || '').includes('application/json')) return json({ error: 'expected JSON' }, 415);
   const user = await requireUser(req, env, c);
   if (!user) return json({ error: 'unauthorized' }, 401);
   const len = Number(req.headers.get('Content-Length') || 0);
@@ -333,28 +338,35 @@ async function chat(req, env, c, ctx) {
   });
 }
 
+const API_PATHS = /^\/(api|auth)\//;
+
 export default {
   async fetch(req, env, ctx) {
-    const c = cfg(env);
     const url = new URL(req.url);
-    const cors = corsHeaders(req, c);
-    if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+    if (!API_PATHS.test(url.pathname)) {
+      // static web app
+      return env.ASSETS ? env.ASSETS.fetch(req) : json({ error: 'not found' }, 404);
+    }
+    const c = cfg(env);
     let res;
     try {
-      if (!env.SESSION_SECRET || !env.GITHUB_CLIENT_ID) res = json({ error: 'worker not configured' }, 500);
+      if (!env.SESSION_SECRET || !env.GITHUB_CLIENT_ID) res = json({ error: 'server not configured (missing secrets)' }, 500);
       else if (url.pathname === '/auth/login' && req.method === 'GET') res = await authLogin(req, env, c);
       else if (url.pathname === '/auth/callback' && req.method === 'GET') res = await authCallback(req, env, c);
+      else if (url.pathname === '/auth/logout' && req.method === 'POST') res = logout(req);
       else if (url.pathname === '/api/me' && req.method === 'GET') res = await me(req, env, c);
       else if (url.pathname === '/api/chat' && req.method === 'POST') res = await chat(req, env, c, ctx);
-      else if (url.pathname === '/' || url.pathname === '/health') res = json({ ok: true, service: 'foot-fit-api' });
+      else if (url.pathname === '/api/health') res = json({ ok: true, service: 'foot-fit' });
       else res = json({ error: 'not found' }, 404);
     } catch (e) {
       console.error(e);
       res = json({ error: 'internal error' }, 500);
     }
-    if (res.status >= 300 && res.status < 400) return res; // redirects: no CORS needed
-    const h = new Headers(res.headers);
-    for (const [k, v] of Object.entries(cors)) h.set(k, v);
-    return new Response(res.body, { status: res.status, headers: h });
+    if (res.status < 300 || res.status >= 400) {
+      const h = new Headers(res.headers);
+      h.set('Cache-Control', 'no-store');
+      res = new Response(res.body, { status: res.status, headers: h });
+    }
+    return res;
   },
 };
