@@ -1,0 +1,43 @@
+name: API worker
+
+on:
+  push:
+    paths: ['worker/**', '.github/workflows/worker.yml']
+  pull_request:
+    paths: ['worker/**']
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+      - run: npx wrangler deploy --dry-run --outdir dist
+
+  deploy:
+    # Opt-in: set repository variable DEPLOY_WORKER=true and secrets
+    # CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID.
+    needs: test
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_WORKER == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

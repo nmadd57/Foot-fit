@@ -1,0 +1,35 @@
+// UI smoke test: export synthetic photos, load the real app, import them via "Use photos".
+const { chromium, devices } = require('playwright');
+const fs = require('fs'); const path = require('path');
+const OUT = process.argv[2] || '/tmp/ff-ui';
+fs.mkdirSync(OUT, { recursive: true });
+(async () => {
+  const args = ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
+  const proxy = process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY } : undefined;
+  const b = await chromium.launch({ args, proxy });
+  const gen = await b.newPage();
+  await gen.goto('http://localhost:8123/test/synthetic.html?export=1');
+  await gen.waitForFunction(() => window.PNGS, null, { timeout: 120000 });
+  const pngs = await gen.evaluate(() => window.PNGS);
+  const files = pngs.map((d, i) => { const f = path.join(OUT, `shot${String(i).padStart(2, '0')}.jpg`); fs.writeFileSync(f, Buffer.from(d.split(',')[1], 'base64')); return f; });
+  await gen.close();
+  const ctx = await b.newContext({ ...devices['iPhone 13'], ignoreHTTPSErrors: true });
+  const p = await ctx.newPage();
+  const errors = [];
+  p.on('pageerror', (e) => errors.push(e.message));
+  p.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  await p.goto('http://localhost:8123/web/index.html');
+  await p.screenshot({ path: path.join(OUT, 'home.png') });
+  await p.setInputFiles('#filePhotos', files);
+  await p.waitForSelector('#results.active', { timeout: 180000 });
+  await p.waitForTimeout(2500);
+  const table = await p.$eval('#measureTable', (t) => t.innerText);
+  console.log(table);
+  await p.screenshot({ path: path.join(OUT, 'results.png'), fullPage: true });
+  const tp = await ctx.newPage();
+  await tp.goto('http://localhost:8123/web/template.html?paper=letter&sheets=2');
+  await tp.screenshot({ path: path.join(OUT, 'template.png'), fullPage: true });
+  await tp.pdf({ path: path.join(OUT, 'template.pdf'), preferCSSPageSize: true, printBackground: true }).catch((e) => console.log('pdf skipped', e.message));
+  console.log('errors:', JSON.stringify(errors));
+  await b.close();
+})();

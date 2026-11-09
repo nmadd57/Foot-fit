@@ -1,0 +1,48 @@
+# Cloudflare Worker for Foot Fit: GitHub sign-in, quotas and the LLM proxy.
+# Deploy:  npx wrangler deploy     (see README for the secrets to set first)
+name = "foot-fit-api"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+[observability]
+enabled = true
+
+[[durable_objects.bindings]]
+name = "QUOTA"
+class_name = "QuotaCounter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["QuotaCounter"]
+
+[vars]
+# Comma-separated origins allowed to call the API and to receive sign-in redirects.
+ALLOWED_ORIGINS = "https://YOUR-USER.github.io,http://localhost:8000"
+# Any OpenAI-compatible endpoint (OpenAI, OpenRouter, Groq, Together, Azure-compatible gateway, vLLM, Ollama…)
+UPSTREAM_BASE_URL = "https://api.openai.com/v1"
+# Must be a vision-capable model.
+UPSTREAM_MODEL = "gpt-4o-mini"
+# Some newer OpenAI models require "max_completion_tokens".
+UPSTREAM_MAX_TOKENS_PARAM = "max_tokens"
+# Optional JSON object of extra headers for the upstream, e.g. {"HTTP-Referer":"https://you.github.io"}
+UPSTREAM_EXTRA_HEADERS = "{}"
+
+# --- access control ---
+ALLOWED_GITHUB_USERS = ""   # empty = anyone (subject to the rules below)
+ALLOWED_GITHUB_ORGS = ""    # requires read:org scope, requested automatically when set
+BLOCKED_GITHUB_USERS = ""
+MIN_ACCOUNT_AGE_DAYS = "30" # deters throwaway accounts
+SESSION_DAYS = "7"
+SESSION_VERSION = "1"       # bump to sign everybody out
+
+# --- spend limits ---
+DAILY_REQUESTS_PER_USER = "20"
+MONTHLY_REQUESTS_PER_USER = "200"
+DAILY_TOKENS_PER_USER = "200000"
+GLOBAL_DAILY_REQUESTS = "1000"
+MAX_OUTPUT_TOKENS = "1000"
+MAX_IMAGES_PER_REQUEST = "4"
+MAX_BODY_BYTES = "3000000"
+
+# Secrets (set with `npx wrangler secret put NAME`):
+#   GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, SESSION_SECRET, UPSTREAM_API_KEY

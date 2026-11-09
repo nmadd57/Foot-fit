@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Foot Fit template</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦶</text></svg>">
+  <style id="pageSize">@page { size: 210mm 297mm; margin: 0; }</style>
+  <style>
+    body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: #e9edf0; color: #16202a; }
+    .controls { max-width: 760px; margin: 0 auto; padding: 16px; }
+    .controls h1 { font-size: 22px; margin: 4px 0; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin: 10px 0; }
+    label { display: flex; flex-direction: column; font-size: 13px; color: #5d6b78; gap: 4px; }
+    select, button { font: inherit; padding: 8px 12px; border-radius: 10px; border: 1px solid #c9d2da; background: #fff; color: #16202a; }
+    button.primary { background: #0b7a75; color: #fff; border-color: #0b7a75; font-weight: 600; cursor: pointer; }
+    .warn { background: #fff4dc; color: #6b4a00; padding: 8px 12px; border-radius: 10px; }
+    .sheets { display: flex; flex-direction: column; align-items: center; gap: 24px; padding: 16px; }
+    .sheet { background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.15); max-width: calc(100vw - 32px); }
+    .sheet svg { display: block; max-width: 100%; height: auto; }
+    @media print {
+      body { background: #fff; }
+      .controls { display: none; }
+      .sheets { padding: 0; gap: 0; display: block; }
+      .sheet { box-shadow: none; max-width: none; break-after: page; page-break-after: always; }
+      .sheet:last-child { break-after: auto; page-break-after: auto; }
+      .sheet svg { max-width: none; }
+    }
+  </style>
+  <script src="js/vendor/cv.js"></script>
+  <script src="js/vendor/aruco.js"></script>
+</head>
+<body>
+  <div class="controls">
+    <h1>🦶 Foot Fit — printable template</h1>
+    <div class="row">
+      <label>Paper <select id="paper">
+        <option value="a4">A4</option><option value="letter">US Letter</option>
+        <option value="a3">A3</option><option value="tabloid">Tabloid (11×17)</option>
+      </select></label>
+      <label>Sheets <select id="sheets">
+        <option value="1">1 sheet</option><option value="2">2 sheets taped end to end</option>
+      </select></label>
+      <button class="primary" onclick="window.print()">Print</button>
+    </div>
+    <p class="warn">In the print dialog choose <b>Actual size / 100% / no scaling</b> and the same paper size. After printing, check the 100&nbsp;mm ruler bar — and enter its real length in the app if it differs.</p>
+    <p id="info"></p>
+  </div>
+  <div class="sheets" id="sheetsOut"></div>
+  <script type="module">
+    import { makeLayout, renderSheetSVG, PAPERS } from './js/templateSpec.js';
+    const q = new URLSearchParams(location.search);
+    const paperSel = document.getElementById('paper'), sheetSel = document.getElementById('sheets');
+    paperSel.value = PAPERS[q.get('paper')] ? q.get('paper') : 'a4';
+    sheetSel.value = q.get('sheets') === '2' ? '2' : '1';
+    function render() {
+      const L = makeLayout(paperSel.value, +sheetSel.value);
+      document.getElementById('pageSize').textContent = `@page { size: ${L.paper.w}mm ${L.paper.h}mm; margin: 0; }`;
+      const out = document.getElementById('sheetsOut');
+      out.innerHTML = '';
+      for (let s = L.sheets - 1; s >= 0; s--) {
+        const d = document.createElement('div'); d.className = 'sheet';
+        d.innerHTML = renderSheetSVG(L, s);
+        out.appendChild(d);
+      }
+      const maxFoot = Math.floor(L.heelLineY - 3);
+      document.getElementById('info').textContent = L.sheets > 1
+        ? `Two sheets: trim sheet 2 along its dashed line, lay it over the top of sheet 1 on the marked line and tape it flat. Small misalignment is corrected automatically. Fits feet up to about ${maxFoot} mm.`
+        : `Fits feet up to about ${maxFoot} mm long. For longer feet choose 2 sheets or a bigger paper size.`;
+      history.replaceState(null, '', `?paper=${paperSel.value}&sheets=${sheetSel.value}`);
+    }
+    paperSel.onchange = sheetSel.onchange = render;
+    render();
+  </script>
+</body>
+</html>

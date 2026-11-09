@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1720">
+  <title>Foot Fit</title>
+  <meta name="description" content="Measure your foot and build a 3D model with your phone camera and a printed template.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦶</text></svg>">
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  } }
+  </script>
+  <script src="js/vendor/cv.js"></script>
+  <script src="js/vendor/aruco.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="./">🦶 <span>Foot Fit</span></a>
+  <div class="spacer"></div>
+  <div id="account" class="account"></div>
+  <button id="btnSettings" class="icon-btn" title="AI settings" aria-label="AI settings">⚙︎</button>
+</header>
+
+<main>
+  <!-- HOME -->
+  <section id="home" class="screen active">
+    <div class="hero">
+      <h1>Measure your foot with your phone</h1>
+      <p>Print the marker template, put your foot on it and walk the camera around. Foot Fit tracks the paper, measures length and width to the millimetre and builds a 3D model you can download.</p>
+    </div>
+
+    <ol class="steps">
+      <li class="card">
+        <h2><span class="num">1</span> Print the template</h2>
+        <div class="row">
+          <label>Paper
+            <select id="paper">
+              <option value="a4">A4</option>
+              <option value="letter">US Letter</option>
+              <option value="a3">A3</option>
+              <option value="tabloid">Tabloid (11×17)</option>
+            </select>
+          </label>
+          <label>Sheets
+            <select id="sheets">
+              <option value="1">1 sheet (feet up to ~260 mm on A4, ~240 mm on Letter)</option>
+              <option value="2">2 sheets taped (longer feet)</option>
+            </select>
+          </label>
+        </div>
+        <p><a id="templateLink" class="btn secondary" href="template.html" target="_blank" rel="noopener">Open printable template ↗</a></p>
+        <p class="hint">Print at <b>100% / Actual size</b>. Then measure the ruler bar under the heel line:
+          <label class="inline">it measures <input id="rulerMm" type="number" step="0.5" min="90" max="110" value="100" inputmode="decimal"> mm</label></p>
+      </li>
+
+      <li class="card">
+        <h2><span class="num">2</span> Scan</h2>
+        <div class="row">
+          <label>Foot
+            <select id="side">
+              <option value="right">Right foot</option>
+              <option value="left">Left foot</option>
+            </select>
+          </label>
+        </div>
+        <ul class="tips">
+          <li>Lay the sheet flat on a floor that <b>contrasts with white paper</b>.</li>
+          <li>Bare foot or a <b>coloured</b> sock. Back of the heel on the heel line.</li>
+          <li>Even, diffuse light. Avoid one strong lamp that casts hard shadows.</li>
+          <li>Keep your shin roughly vertical. A helper holding the phone makes it easier.</li>
+        </ul>
+        <div class="row">
+          <button id="btnScan" class="btn primary">Start camera scan</button>
+          <label class="btn secondary file">Use photos instead<input id="filePhotos" type="file" accept="image/*" multiple hidden></label>
+        </div>
+      </li>
+
+      <li class="card">
+        <h2><span class="num">3</span> Results</h2>
+        <p>Length, ball width, heel width, instep height and girths, a 3D model (STL/OBJ) and — if an AI backend is connected — a shoe-fit report.</p>
+        <div id="history" class="history"></div>
+      </li>
+    </ol>
+    <p class="fineprint">Images are processed in your browser. When you use an AI feature, a few downscaled images and your measurements are sent to the configured AI endpoint.</p>
+  </section>
+
+  <!-- SCAN -->
+  <section id="scan" class="screen scan">
+    <div class="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="view"></canvas>
+      <div class="scan-top">
+        <div id="stepTitle" class="step-title">Top view</div>
+        <div id="stepHint" class="step-hint">Hold the phone flat above the foot.</div>
+        <div id="aiSay" class="ai-say" hidden></div>
+      </div>
+      <div class="scan-hud">
+        <span id="hudMarkers" class="chip">markers 0</span>
+        <span id="hudAngle" class="chip">–</span>
+        <span id="hudCount" class="chip">0 frames</span>
+      </div>
+      <svg id="ring" class="ring" viewBox="-60 -60 120 120" aria-hidden="true"></svg>
+      <div class="scan-bottom">
+        <button id="btnCancel" class="btn ghost">Cancel</button>
+        <button id="btnCoach" class="btn ghost" title="Ask the AI what to do next">✨ AI tip</button>
+        <button id="btnCapture" class="btn ghost" title="Capture this frame now">◉</button>
+        <button id="btnNext" class="btn primary">Next</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- PROCESSING -->
+  <section id="processing" class="screen">
+    <div class="card center">
+      <h2>Processing scan</h2>
+      <div class="progress"><div id="progBar"></div></div>
+      <p id="progText">Starting…</p>
+    </div>
+  </section>
+
+  <!-- RESULTS -->
+  <section id="results" class="screen">
+    <div class="results-grid">
+      <div class="card">
+        <h2 id="resTitle">Results</h2>
+        <div id="warnings"></div>
+        <table class="measures" id="measureTable"></table>
+        <div class="row">
+          <label class="grow">Outline sensitivity
+            <input id="sensitivity" type="range" min="0.6" max="1.5" step="0.05" value="1">
+          </label>
+          <button id="btnRecompute" class="btn secondary">Recompute</button>
+        </div>
+        <div class="row wrap">
+          <button id="btnDlSTL" class="btn secondary">Download STL</button>
+          <button id="btnDlOBJ" class="btn secondary">Download OBJ</button>
+          <button id="btnDlJSON" class="btn secondary">Download JSON</button>
+          <button id="btnDlPNG" class="btn secondary">Download outline PNG</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>AI assistant</h2>
+        <p class="hint" id="aiStatus"></p>
+        <div class="row wrap">
+          <button id="btnReview" class="btn secondary">✨ Check the outline</button>
+          <button id="btnReport" class="btn primary">✨ Shoe-fit report</button>
+        </div>
+        <div id="aiOut" class="ai-out"></div>
+      </div>
+      <div class="card">
+        <h2>Footprint</h2>
+        <div id="topImg" class="topimg"></div>
+        <p class="legend"><span class="sw c1"></span>length <span class="sw c2"></span>ball width <span class="sw c3"></span>heel width</p>
+      </div>
+      <div class="card">
+        <h2>3D model</h2>
+        <div id="viewer3d" class="viewer3d"><p class="hint">No 3D model — capture at least 4 views around the foot.</p></div>
+      </div>
+      <div class="card">
+        <h2>Side views</h2>
+        <div id="sideViews" class="thumbs"></div>
+      </div>
+    </div>
+    <div class="row center">
+      <button id="btnNewScan" class="btn secondary">New scan</button>
+    </div>
+  </section>
+</main>
+
+<dialog id="settings">
+  <form method="dialog" class="settings">
+    <h2>AI assistant backend</h2>
+    <p class="hint">The AI coaches the scan, reviews the outline and writes a fit report. Measurements work without it.</p>
+    <label class="radio"><input type="radio" name="mode" value="hosted"> <span><b>Hosted</b> — sign in with GitHub. Free, limited number of AI requests per account.</span></label>
+    <label class="radio"><input type="radio" name="mode" value="custom"> <span><b>Your own endpoint</b> — any OpenAI-compatible API (OpenAI, OpenRouter, Groq, Together, LM Studio, Ollama, vLLM…). Must support images and allow browser (CORS) requests.</span></label>
+    <div class="custom-fields">
+      <label>Base URL <input name="baseUrl" placeholder="https://api.openai.com/v1" autocomplete="off"></label>
+      <label>API key <input name="apiKey" type="password" placeholder="sk-… (stored only in this browser)" autocomplete="off"></label>
+      <label>Model <input name="model" placeholder="gpt-4o-mini, llava, qwen2.5-vl…" autocomplete="off"></label>
+    </div>
+    <label class="radio"><input type="radio" name="mode" value="off"> <span><b>Off</b> — no AI features.</span></label>
+    <p id="settingsTest" class="hint"></p>
+    <div class="row">
+      <button value="test" id="btnTestAI" class="btn secondary" type="button">Test connection</button>
+      <div class="spacer"></div>
+      <button value="cancel" class="btn ghost">Cancel</button>
+      <button value="save" id="btnSaveSettings" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,92 @@
+<!doctype html><meta charset="utf-8"><body style="margin:0">
+<script src="../web/js/vendor/cv.js"></script><script src="../web/js/vendor/aruco.js"></script>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js"}}</script>
+<script type="module">
+// End-to-end synthetic test: render a template + foot proxy from many poses, run the real pipeline.
+import * as THREE from 'three';
+import { makeLayout, renderSheetSVG, MARGIN } from '../web/js/templateSpec.js';
+import { processScan } from '../web/js/pipeline.js';
+const P = new URLSearchParams(location.search);
+const paper = P.get('paper') || 'a4', sheets = +(P.get('sheets') || 1);
+const L = makeLayout(paper, sheets);
+const W = 1280, H = 960;
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(W, H, false);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0xd8d0c0);
+scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(100, -200, -600); scene.add(sun);
+// floor with noise
+const fc = document.createElement('canvas'); fc.width = fc.height = 512; const fg = fc.getContext('2d');
+for (let i = 0; i < 512; i += 4) for (let j = 0; j < 512; j += 4) { const v = 90 + Math.random() * 40; fg.fillStyle = `rgb(${v+20},${v},${v-25})`; fg.fillRect(i, j, 4, 4); }
+const ftex = new THREE.CanvasTexture(fc); ftex.wrapS = ftex.wrapT = THREE.RepeatWrapping; ftex.repeat.set(8, 8);
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000), new THREE.MeshLambertMaterial({ map: ftex, side: THREE.DoubleSide }));
+floor.position.set(L.W / 2, L.H / 2, 0.5); scene.add(floor);
+// paper sheets
+for (let s = 0; s < sheets; s++) {
+  const svg = renderSheetSVG(L, s);
+  const img = new Image(); img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg); await img.decode();
+  const c = document.createElement('canvas'); const pxmm = 8; c.width = L.paper.w * pxmm; c.height = L.paper.h * pxmm;
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  const tex = new THREE.CanvasTexture(c); tex.anisotropy = renderer.capabilities.getMaxAnisotropy(); tex.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(L.paper.w, L.paper.h), new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, color: 0xf2f2f2 }));
+  const sh = L.sheetList[s];
+  m.scale.y = -1;
+  // page top-left at frame (-(paper.w-W)/2, sh.y0 - MARGIN); apply a small taping error on sheet 1
+  const err = s === 1 ? [1.5, -2.0] : [0, 0];
+  m.position.set(L.W / 2 + err[0], sh.y0 - MARGIN + L.paper.h / 2 + err[1], s === 1 ? -0.05 : 0);
+  if (s === 1) m.rotation.z = 0.004;
+  scene.add(m);
+}
+// foot proxy: half-ellipsoid; truth footprint = ellipse
+const FL = +(P.get('len') || 250), FW = +(P.get('wid') || 96), FH = 55;
+const cyFoot = L.heelLineY - FL / 2;
+const skin = new THREE.MeshLambertMaterial({ color: 0xd9a07f });
+const foot = new THREE.Mesh(new THREE.SphereGeometry(1, 96, 64), skin);
+foot.scale.set(FW / 2, FL / 2, FH); foot.position.set(L.W / 2, cyFoot, 0); scene.add(foot);
+const leg = new THREE.Mesh(new THREE.CylinderGeometry(30, 34, 420, 48), skin);
+leg.rotation.x = Math.PI / 2; leg.position.set(L.W / 2, L.heelLineY - 60, -210); scene.add(leg);
+const pants = new THREE.Mesh(new THREE.CylinderGeometry(48, 48, 400, 48), new THREE.MeshLambertMaterial({ color: 0x2a3d66 }));
+pants.rotation.x = Math.PI / 2; pants.position.set(L.W / 2, L.heelLineY - 60, -420 - 200); scene.add(pants);
+
+const cam = new THREE.PerspectiveCamera(55, W / H, 10, 5000);
+cam.up.set(0, 0, -1);
+const target = new THREE.Vector3(L.W / 2, cyFoot, 0);
+function shot(pos, look = target, upv) {
+  cam.position.copy(pos); if (upv) cam.up.copy(upv); else cam.up.set(0, 0, -1); cam.lookAt(look); cam.updateMatrixWorld();
+  renderer.render(scene, cam);
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'); g.drawImage(renderer.domElement, 0, 0);
+  return g.getImageData(0, 0, W, H);
+}
+const det = new AR.Detector({ dictionaryName: 'ARUCO_MIP_36h12', maxHammingDistance: 4 });
+const detect = (img) => det.detect(img).map((m) => ({ id: m.id, corners: m.corners.map((p) => [p.x, p.y]) }));
+const frames = [];
+// top views: from above, slightly offset, image "up" toward toes
+const camH = sheets > 1 ? 700 : 520;
+for (const [dx, dy] of [[0, 0], [15, -20], [-10, 25]]) {
+  const img = shot(new THREE.Vector3(L.W / 2 + dx, L.H / 2 + dy, -camH), new THREE.Vector3(L.W / 2 + dx * 0.5, L.H / 2 + dy * 0.5, 0), new THREE.Vector3(0, -1, 0));
+  frames.push({ img, dets: detect(img), kind: 'top' });
+}
+for (let az = 0; az < 360; az += 30) {
+  if (az === 180) continue; // pretend the user could not reach directly behind
+  const el = (az % 60 === 0 ? 40 : 30) * Math.PI / 180, r = 480;
+  const ar = az * Math.PI / 180;
+  const pos = new THREE.Vector3(target.x + r * Math.cos(el) * Math.sin(ar), target.y - r * Math.cos(el) * Math.cos(ar), -r * Math.sin(el));
+  const img = shot(pos);
+  frames.push({ img, dets: detect(img), kind: 'orbit' });
+}
+window.SHOTS = frames.map((f) => f.dets.length);
+if (P.get('export')) {
+  window.PNGS = frames.map((f) => { const c = document.createElement('canvas'); c.width = f.img.width; c.height = f.img.height; c.getContext('2d').putImageData(f.img, 0, 0); return c.toDataURL('image/jpeg', 0.92); });
+  throw new Error('export only');
+}
+const t0 = performance.now();
+const res = await processScan(frames, L, { onStatus: (s) => console.log(s), debug: true });
+const truth = { lengthMm: FL, ballWidthMm: FW, heightMm: FH };
+const vf = res.debug.volFootprint; if (vf) { const c = document.createElement('canvas'); c.width = vf.w; c.height = vf.h; const g = c.getContext('2d'); const id = g.createImageData(vf.w, vf.h); for (let p = 0; p < vf.w*vf.h; p++) { const v = vf.mask[p] ? 255 : 0; id.data[4*p]=v; id.data[4*p+1]=v; id.data[4*p+2]=v; id.data[4*p+3]=255; } g.putImageData(id,0,0); c.style.width = (vf.w*4)+'px'; c.style.imageRendering='pixelated'; document.body.appendChild(c); }
+for (const s of (res.debug.silhouettes||[])) { const c = document.createElement('canvas'); c.width = s.w; c.height = s.h; const g = c.getContext('2d'); const id = g.createImageData(s.w, s.h); for (let p = 0; p < s.w*s.h; p++) { const v = s.mask[p] ? 255 : 0; id.data[4*p]=v; id.data[4*p+1]=s.fr.img.data[4*p+1]*0.5; id.data[4*p+2]=v; id.data[4*p+3]=255; } g.putImageData(id,0,0); c.style.width='300px'; c.title = s.g.azimuthDeg.toFixed(0); document.body.appendChild(c); }
+const dbgOut = { ...res.debug }; delete dbgOut.volFootprint; delete dbgOut.silhouettes; res.debug = dbgOut;
+window.RESULT = { truth, ms: performance.now() - t0, measures: res.measures, warnings: res.warnings, debug: res.debug, markers: window.SHOTS, tris: res.mesh ? res.mesh.indices.length / 3 : 0, fovTruthPx: (H / 2) / Math.tan(27.5 * Math.PI / 180) };
+document.body.appendChild(res.topCanvas);
+for (const c of res.viewOverlays) { c.style.width = '400px'; document.body.appendChild(c); }
+</script>
